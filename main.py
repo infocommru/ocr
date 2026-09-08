@@ -35,14 +35,19 @@ class OCRResult:
 
 
 def get_mime_type(file: UploadFile) -> str:
-    mime, _ = mimetypes.guess_type(file.filename or "")
-    if not mime:
-        mime = file.content_type or "image/jpeg"
+    # Проверяем расширение файла
+    filename = file.filename or ""
+    ext = os.path.splitext(filename)[1].lower()
     
-    mime_upper = mime.split("/")[-1].upper()
-    if mime_upper == "JPG":
-        mime_upper = "JPEG"
-    return mime_upper
+    # Проверяем content_type от клиента и расширение
+    content_type = (file.content_type or "").lower()
+    
+    if ext not in [".jpg", ".jpeg"] and content_type not in ["image/jpeg", "image/jpg"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Разрешены только файлы формата JPEG (.jpg, .jpeg)"
+        )
+    return "JPEG"
 
 
 async def start_processing(session: aiohttp.ClientSession, ocr_item: OCRResult, content_b64: str, headers: dict):
@@ -340,11 +345,11 @@ HTML_CONTENT = """
 
 <div class="container">
     <h2>🔍 Yandex OCR Scanner</h2>
-    <p class="subtitle">Загрузите изображения или PDF для распознавания текста</p>
+    <p class="subtitle">Загрузите изображения для распознавания текста</p>
 
     <form id="ocrForm">
         <div class="dropzone" id="dropzone">
-            <input type="file" id="fileInput" name="files" multiple accept="image/*,application/pdf">
+            <input type="file" id="fileInput" name="files" multiple accept="image/jpeg">
             <div style="font-size: 2rem;">📁</div>
             <div style="margin-top: 8px;">Перетащите файлы сюда или нажмите для выбора</div>
             <div class="file-info" id="fileCountText">Файлы не выбраны</div>
@@ -549,6 +554,12 @@ async def run_scan_file(file: UploadFile = File(...)):
             )
         if not content:
             raise HTTPException(status_code=400, detail="Пустой файл (0 байт)")
+
+        if not content.startswith(b'\xff\xd8\xff'):
+            raise HTTPException(
+                status_code=400,
+                detail="Файл не является валидным изображением JPEG"
+            )
 
         b64_content = base64.b64encode(content).decode("utf-8")
     except HTTPException:
