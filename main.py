@@ -4,12 +4,22 @@ import os
 import base64
 import mimetypes
 import time
+import json  # Добавлено для парсинга JSON/JSONL
 import aiohttp
 from aiolimiter import AsyncLimiter
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.responses import FileResponse, JSONResponse
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Yandex OCR Web Service")
+
+# Получаем абсолютный путь к папке, где лежит этот файл (main.py)
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+
+# Монтируем статику по абсолютному пути
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Переменные окружения
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
@@ -35,28 +45,28 @@ class OCRResult:
 
 
 def get_mime_type(file: UploadFile) -> str:
-    # Проверяем расширение файла
     filename = file.filename or ""
     ext = os.path.splitext(filename)[1].lower()
-    
-    # Проверяем content_type от клиента и расширение
     content_type = (file.content_type or "").lower()
     
-    if ext not in [".jpg", ".jpeg"] and content_type not in ["image/jpeg", "image/jpg"]:
+    if ext in [".jpg", ".jpeg"] or content_type in ["image/jpeg", "image/jpg"]:
+        return "JPEG"
+    elif ext == ".pdf" or content_type == "application/pdf":
+        return "application/pdf"
+    else:
         raise HTTPException(
             status_code=400,
-            detail="Разрешены только файлы формата JPEG (.jpg, .jpeg)"
+            detail="Разрешены только файлы формата JPEG (.jpg, .jpeg) или PDF (.pdf)"
         )
-    return "JPEG"
 
 
-async def start_processing(session: aiohttp.ClientSession, ocr_item: OCRResult, content_b64: str, headers: dict):
+async def start_processing(session: aiohttp.ClientSession, ocr_item: OCRResult, content_b64: str, headers: dict, model: str = "page"):
     async with async_limiter_post:
         ocr_item.status = "processing"
         data = {
             "mimeType": ocr_item.mime_type,
             "languageCodes": ["ru", "en"],
-            "model": "page",
+            "model": model,
             "content": content_b64
         }
         url = "https://ocr.api.cloud.yandex.net/ocr/v1/recognizeTextAsync"
@@ -130,9 +140,29 @@ async def get_result(session: aiohttp.ClientSession, ocr_item: OCRResult, header
 
                 async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
                     if response.status == 200:
-                        res_json = await response.json()
-                        text = res_json.get("result", {}).get("textAnnotation", {}).get("fullText", "")
-                        ocr_item.text = text
+                        response_text = await response.text()
+                        
+                        # PDF возвращает результат в формате JSONL (по строке на страницу)
+                        if ocr_item.mime_type == "application/pdf":
+                            texts = []
+                            for line in response_text.strip().split('\n'):
+                                if line.strip():
+                                    try:
+                                        page_data = json.loads(line)
+                                        if "error" in page_data:
+                                            ocr_item.error = f"Ошибка операции: {page_data['error'].get('message', 'Сбой распознавания')}"
+                                            ocr_item.status = "failed"
+                                            return ocr_item
+                                        full_text = page_data.get("result", {}).get("textAnnotation", {}).get("fullText", "")
+                                        if full_text:
+                                            texts.append(full_text)
+                                    except json.JSONDecodeError:
+                                        continue
+                            ocr_item.text = "\n\n--- Страница ---\n\n".join(texts)
+                        else:
+                            res_json = json.loads(response_text)
+                            ocr_item.text = res_json.get("result", {}).get("textAnnotation", {}).get("fullText", "")
+                        
                         ocr_item.status = "completed"
                         return ocr_item
                     else:
@@ -143,399 +173,15 @@ async def get_result(session: aiohttp.ClientSession, ocr_item: OCRResult, header
         except Exception as e:
             await asyncio.sleep(1.5)
 
-
-HTML_CONTENT = """
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Yandex OCR Service</title>
-    <!-- Подключаем JSZip для создания архива прямо в браузере -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-    <style>
-        :root {
-            --primary: #2563eb;
-            --primary-hover: #1d4ed8;
-            --bg: #f8fafc;
-            --card: #ffffff;
-            --text: #1e293b;
-            --border: #e2e8f0;
-            --error: #ef4444;
-            --error-bg: #fef2f2;
-            --success: #10b981;
-            --success-bg: #ecfdf5;
-            --warning: #f59e0b;
-        }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: var(--bg);
-            color: var(--text);
-            margin: 0;
-            padding: 40px 20px;
-            display: flex;
-            justify-content: center;
-        }
-
-        .container {
-            width: 100%;
-            max-width: 650px;
-            background: var(--card);
-            border-radius: 12px;
-            padding: 32px;
-            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.01);
-            border: 1px solid var(--border);
-        }
-
-        h2 {
-            margin-top: 0;
-            font-size: 1.5rem;
-            color: #0f172a;
-        }
-
-        p.subtitle {
-            color: #64748b;
-            font-size: 0.95rem;
-            margin-top: -8px;
-            margin-bottom: 24px;
-        }
-
-        .dropzone {
-            border: 2px dashed var(--border);
-            border-radius: 8px;
-            padding: 30px 20px;
-            text-align: center;
-            background: #fafafa;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            position: relative;
-        }
-
-        .dropzone:hover {
-            border-color: var(--primary);
-            background: #f0f7ff;
-        }
-
-        .dropzone input[type="file"] {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            opacity: 0;
-            cursor: pointer;
-        }
-
-        .file-info {
-            margin-top: 12px;
-            font-size: 0.9rem;
-            color: #475569;
-            font-weight: 500;
-        }
-
-        button.btn-submit {
-            width: 100%;
-            margin-top: 20px;
-            padding: 12px 20px;
-            background-color: var(--primary);
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 1rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-
-        button.btn-submit:hover {
-            background-color: var(--primary-hover);
-        }
-
-        button.btn-submit:disabled {
-            background-color: #94a3b8;
-            cursor: not-allowed;
-        }
-
-        .progress-wrapper {
-            margin-top: 24px;
-            display: none;
-        }
-
-        .progress-header {
-            display: flex;
-            justify-content: space-between;
-            font-size: 0.875rem;
-            font-weight: 600;
-            margin-bottom: 8px;
-        }
-
-        .progress-bar-bg {
-            width: 100%;
-            height: 10px;
-            background-color: #e2e8f0;
-            border-radius: 999px;
-            overflow: hidden;
-        }
-
-        .progress-bar-fill {
-            height: 100%;
-            width: 0%;
-            background-color: var(--primary);
-            border-radius: 999px;
-            transition: width 0.3s ease;
-        }
-
-        .status-box {
-            margin-top: 20px;
-            padding: 16px;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            display: none;
-        }
-
-        .status-box.success {
-            background-color: var(--success-bg);
-            border: 1px solid #a7f3d0;
-            color: #065f46;
-        }
-
-        .status-box.warning {
-            background-color: #fffbeb;
-            border: 1px solid #fde68a;
-            color: #92400e;
-        }
-
-        .status-box.error {
-            background-color: var(--error-bg);
-            border: 1px solid #fecaca;
-            color: #991b1b;
-        }
-
-        .error-list {
-            margin-top: 12px;
-            padding-left: 0;
-            list-style: none;
-        }
-
-        .error-item {
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-            padding: 8px 12px;
-            background: rgba(255, 255, 255, 0.8);
-            border-radius: 6px;
-            margin-bottom: 6px;
-            font-size: 0.85rem;
-            border: 1px solid rgba(0,0,0,0.08);
-        }
-
-        .error-filename {
-            font-weight: 600;
-            word-break: break-all;
-            color: #1e293b;
-        }
-
-        .error-reason {
-            color: var(--error);
-        }
-    </style>
-</head>
-<body>
-
-<div class="container">
-    <h2>🔍 Yandex OCR Scanner</h2>
-    <p class="subtitle">Загрузите изображения для распознавания текста</p>
-
-    <form id="ocrForm">
-        <div class="dropzone" id="dropzone">
-            <input type="file" id="fileInput" name="files" multiple accept="image/jpeg">
-            <div style="font-size: 2rem;">📁</div>
-            <div style="margin-top: 8px;">Перетащите файлы сюда или нажмите для выбора</div>
-            <div class="file-info" id="fileCountText">Файлы не выбраны</div>
-        </div>
-
-        <button type="submit" class="btn-submit" id="submitBtn" disabled>Запустить обработку</button>
-    </form>
-
-    <div class="progress-wrapper" id="progressWrapper">
-        <div class="progress-header">
-            <span id="progressStatusText">Подготовка...</span>
-            <span id="progressPercentText">0%</span>
-        </div>
-        <div class="progress-bar-bg">
-            <div class="progress-bar-fill" id="progressBarFill"></div>
-        </div>
-    </div>
-
-    <div class="status-box" id="statusBox"></div>
-</div>
-
-<script>
-    const fileInput = document.getElementById('fileInput');
-    const fileCountText = document.getElementById('fileCountText');
-    const submitBtn = document.getElementById('submitBtn');
-    const ocrForm = document.getElementById('ocrForm');
-
-    const progressWrapper = document.getElementById('progressWrapper');
-    const progressBarFill = document.getElementById('progressBarFill');
-    const progressStatusText = document.getElementById('progressStatusText');
-    const progressPercentText = document.getElementById('progressPercentText');
-    const statusBox = document.getElementById('statusBox');
-
-    fileInput.addEventListener('change', () => {
-        const count = fileInput.files.length;
-        if (count > 0) {
-            fileCountText.innerText = `Выбрано файлов: ${count}`;
-            submitBtn.disabled = false;
-        } else {
-            fileCountText.innerText = 'Файлы не выбраны';
-            submitBtn.disabled = true;
-        }
-    });
-
-    function updateProgress(completed, total) {
-        const percent = (completed / total) * 100;
-        progressBarFill.style.width = `${percent}%`;
-        progressPercentText.innerText = `${Math.round(percent)}%`;
-        progressStatusText.innerText = `Обработано ${completed} из ${total} файлов`;
-    }
-
-    // Вспомогательная функция отправки одиночного файла
-    async function processSingleFile(file) {
-        const formData = new FormData();
-        formData.append('file', file);
-
-        try {
-            const res = await fetch('/scan-file', {
-                method: 'POST',
-                body: formData
-            });
-
-            if (res.ok) {
-                const data = await res.json();
-                return { success: true, filename: file.name, txtFilename: data.txt_filename, text: data.text };
-            } else {
-                const errData = await res.json();
-                const reason = typeof errData.detail === 'string' ? errData.detail : (errData.detail?.message || 'Сбой обработки');
-                return { success: false, filename: file.name, error: reason };
-            }
-        } catch (err) {
-            return { success: false, filename: file.name, error: 'Сетевая ошибка сервера' };
-        }
-    }
-
-    ocrForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const files = Array.from(fileInput.files);
-        const totalFiles = files.length;
-        if (totalFiles === 0) return;
-
-        submitBtn.disabled = true;
-        statusBox.style.display = 'none';
-        statusBox.className = 'status-box';
-        progressWrapper.style.display = 'block';
-        updateProgress(0, totalFiles);
-
-        let completedCount = 0;
-        const results = [];
-        const concurrencyLimit = 5; // Одновременно отправляем не более 5 файлов
-
-        // Пул выполнения файлов с честным счетчиком
-        const executePool = async () => {
-            const pool = [];
-            for (const file of files) {
-                const task = processSingleFile(file).then(res => {
-                    completedCount++;
-                    updateProgress(completedCount, totalFiles);
-                    results.push(res);
-                });
-                pool.push(task);
-
-                if (pool.length >= concurrencyLimit) {
-                    await Promise.race(pool);
-                    // Удаляем завершенные задачи из пула
-                    for (let i = pool.length - 1; i >= 0; i--) {
-                        if (pool[i].isFulfilled) pool.splice(i, 1);
-                    }
-                }
-            }
-            await Promise.all(pool);
-        };
-
-        await executePool();
-
-        // Фильтрация результатов
-        const successful = results.filter(r => r.success);
-        const failed = results.filter(r => !r.success);
-
-        // Если есть хоть один распознанный файл — запаковываем в ZIP через JSZip
-        if (successful.length > 0) {
-            const zip = new JSZip();
-            const usedNames = {};
-
-            successful.forEach(item => {
-                let name = item.txtFilename;
-                if (usedNames[name]) {
-                    usedNames[name]++;
-                    const parts = name.split('.');
-                    const ext = parts.pop();
-                    name = `${parts.join('.')}_${usedNames[name]}.${ext}`;
-                } else {
-                    usedNames[name] = 1;
-                }
-                zip.file(name, item.text);
-            });
-
-            const content = await zip.generateAsync({ type: 'blob' });
-            const downloadUrl = window.URL.createObjectURL(content);
-            const a = document.createElement('a');
-            a.href = downloadUrl;
-            a.download = 'ocr_results.zip';
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-        }
-
-        // Отрисовка статуса
-        statusBox.style.display = 'block';
-        if (failed.length === 0) {
-            statusBox.className = 'status-box success';
-            statusBox.innerHTML = `<strong>Успешно!</strong> Все файлы (${successful.length}) обработаны. Архив <code>ocr_results.zip</code> скачан.`;
-        } else if (successful.length > 0) {
-            statusBox.className = 'status-box warning';
-            let html = `<strong>Частично выполнено:</strong> Распознано ${successful.length} из ${totalFiles}. Ошибок: ${failed.length}.<ul class="error-list">`;
-            failed.forEach(err => {
-                html += `<li class="error-item"><span class="error-filename">📄 ${err.filename}</span><span class="error-reason">❌ ${err.error}</span></li>`;
-            });
-            html += '</ul>';
-            statusBox.innerHTML = html;
-        } else {
-            statusBox.className = 'status-box error';
-            let html = `<strong>Ошибка:</strong> Ни один файл не был распознан.<ul class="error-list">`;
-            failed.forEach(err => {
-                html += `<li class="error-item"><span class="error-filename">📄 ${err.filename}</span><span class="error-reason">❌ ${err.error}</span></li>`;
-            });
-            html += '</ul>';
-            statusBox.innerHTML = html;
-        }
-
-        submitBtn.disabled = false;
-    });
-</script>
-
-</body>
-</html>
-"""
-
-
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=FileResponse)
 async def get_index():
-    return HTMLResponse(content=HTML_CONTENT)
-
+    return FileResponse("static/index.html")
 
 @app.post("/scan-file")
-async def run_scan_file(file: UploadFile = File(...)):
+async def run_scan_file(
+    file: UploadFile = File(...),
+    model: str = Form("page")  # Добавляем параметр с дефолтным значением
+):
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         raise HTTPException(
             status_code=422,
@@ -555,10 +201,15 @@ async def run_scan_file(file: UploadFile = File(...)):
         if not content:
             raise HTTPException(status_code=400, detail="Пустой файл (0 байт)")
 
-        if not content.startswith(b'\xff\xd8\xff'):
+        if item.mime_type == "JPEG" and not content.startswith(b'\xff\xd8\xff'):
             raise HTTPException(
                 status_code=400,
                 detail="Файл не является валидным изображением JPEG"
+            )
+        elif item.mime_type == "application/pdf" and not content.startswith(b'%PDF'):
+            raise HTTPException(
+                status_code=400,
+                detail="Файл не является валидным PDF-документом"
             )
 
         b64_content = base64.b64encode(content).decode("utf-8")
@@ -576,7 +227,7 @@ async def run_scan_file(file: UploadFile = File(...)):
 
     connector = aiohttp.TCPConnector(limit=10)
     async with aiohttp.ClientSession(connector=connector) as session:
-        await start_processing(session, item, b64_content, headers)
+        await start_processing(session, item, b64_content, headers, model)
         if item.status != "failed" and item.operation_id:
             await get_result(session, item, headers)
 

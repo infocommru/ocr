@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Yandex OCR Service</title>
+        <script src="/static/jszip.js"></script>
+        <link rel="stylesheet" href="/static/scan.css">
+    </head>
+    <body>
+        <div class="container">
+            <h2>🔍 Yandex OCR Scanner</h2>
+            <p class="subtitle">Загрузите изображения или документы для распознавания текста</p>
+
+            <form id="ocrForm">
+                <div class="dropzone" id="dropzone">
+                    <input type="file" id="fileInput" name="files" multiple accept="image/jpeg, application/pdf">
+                    <div style="font-size: 2rem;">📁</div>
+                    <div style="margin-top: 8px;">Перетащите файлы сюда или нажмите для выбора (JPEG, PDF)</div>
+                    <div class="file-info" id="fileCountText">Файлы не выбраны</div>
+                </div>
+
+                <div style="margin-top: 16px;">
+                    <label for="modelSelect" style="font-size: 0.9rem; font-weight: 500; color: #475569; display: block; margin-bottom: 6px;">Модель распознавания:</label>
+                    <select id="modelSelect" style="width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 0.9rem; background-color: white; cursor: pointer;">
+                        <option value="page">Стандартная (печатный текст)</option>
+                        <option value="handwritten">Специализированная (печатный и рукописный текст)</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn-submit" id="submitBtn" disabled>Запустить обработку</button>
+            </form>
+
+            <div class="progress-wrapper" id="progressWrapper">
+                <div class="progress-header">
+                    <span id="progressStatusText">Подготовка...</span>
+                    <span id="progressPercentText">0%</span>
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" id="progressBarFill"></div>
+                </div>
+            </div>
+
+            <div class="status-box" id="statusBox"></div>
+        </div>
+
+        <script src="/static/scan.js"></script>
+    </body>
+</html>
