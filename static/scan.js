@@ -29,9 +29,10 @@ function updateProgress(completed, total) {
 
 async function processSingleFile(file) {
     const formData = new FormData();
-    formData.append('file', file);
 
+    formData.append('file', file);
     formData.append('model', document.getElementById('modelSelect').value);
+    formData.append('pdflayer', document.getElementById('return_PDF').checked);
 
     try {
         const res = await fetch('/scan-file', {
@@ -41,7 +42,7 @@ async function processSingleFile(file) {
 
         if (res.ok) {
             const data = await res.json();
-            return { success: true, filename: file.name, txtFilename: data.txt_filename, text: data.text };
+            return { success: true, filename: file.name, txtFilename: data.txt_filename, text: data.text, pdf: data.pdf };
         } else {
             const errData = await res.json();
             const reason = typeof errData.detail === 'string' ? errData.detail : (errData.detail?.message || 'Сбой обработки');
@@ -99,6 +100,9 @@ ocrForm.addEventListener('submit', async (e) => {
 
         successful.forEach(item => {
             let name = item.txtFilename;
+
+            console.log('Full item object:', item);
+
             if (usedNames[name]) {
                 usedNames[name]++;
                 const parts = name.split('.');
@@ -107,7 +111,11 @@ ocrForm.addEventListener('submit', async (e) => {
             } else {
                 usedNames[name] = 1;
             }
-            zip.file(name, item.text);
+
+            if(item.text != null)
+                zip.file(name, item.text);
+            else if(item.pdf != null)
+                zip.file(name, Uint8Array.from(atob(item.pdf), c => c.charCodeAt(0)));
         });
 
         const content = await zip.generateAsync({ type: 'blob' });

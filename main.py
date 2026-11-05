@@ -11,6 +11,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
+from textLayer import add_text_layer
 
 app = FastAPI(title="Yandex OCR Web Service")
 
@@ -38,10 +39,11 @@ class OCRResult:
         self.filename = filename
         self.mime_type = mime_type
         self.operation_id = None
-        self.txt_filename = f"{os.path.splitext(filename)[0]}.txt"
+        self.txt_filename = os.path.splitext(filename)[0]
         self.text = None
         self.error = None
         self.status = "pending"
+        self.raw_jsons = None
 
 
 def get_mime_type(file: UploadFile) -> str:
@@ -104,7 +106,7 @@ async def start_processing(session: aiohttp.ClientSession, ocr_item: OCRResult, 
                 return ocr_item
 
 
-async def get_result(session: aiohttp.ClientSession, ocr_item: OCRResult, headers: dict):
+async def get_result(session: aiohttp.ClientSession, ocr_item: OCRResult, headers: dict, PDFlayer: bool):
     if ocr_item.status == "failed" or not ocr_item.operation_id:
         return ocr_item
 
@@ -144,21 +146,32 @@ async def get_result(session: aiohttp.ClientSession, ocr_item: OCRResult, header
                         
                         # PDF возвращает результат в формате JSONL (по строке на страницу)
                         if ocr_item.mime_type == "application/pdf":
-                            texts = []
-                            for line in response_text.strip().split('\n'):
-                                if line.strip():
-                                    try:
-                                        page_data = json.loads(line)
-                                        if "error" in page_data:
-                                            ocr_item.error = f"Ошибка операции: {page_data['error'].get('message', 'Сбой распознавания')}"
-                                            ocr_item.status = "failed"
-                                            return ocr_item
-                                        full_text = page_data.get("result", {}).get("textAnnotation", {}).get("fullText", "")
-                                        if full_text:
-                                            texts.append(full_text)
-                                    except json.JSONDecodeError:
-                                        continue
-                            ocr_item.text = "\n\n--- Страница ---\n\n".join(texts)
+                            if not PDFlayer:
+                                texts = []
+                                for line in response_text.strip().split('\n'):
+                                    if line.strip():
+                                        try:
+                                            page_data = json.loads(line)
+                                            if "error" in page_data:
+                                                ocr_item.error = f"Ошибка операции: {page_data['error'].get('message', 'Сбой распознавания')}"
+                                                ocr_item.status = "failed"
+                                                return ocr_item
+                                            full_text = page_data.get("result", {}).get("textAnnotation", {}).get("fullText", "")
+                                            if full_text:
+                                                texts.append(full_text)
+                                        except json.JSONDecodeError:
+                                            continue
+                                ocr_item.text = "\n\n--- Страница ---\n\n".join(texts)
+                            else:
+                                data = []
+                                for line in response_text.strip().split('\n'):
+                                    if line.strip():
+                                        try:
+                                            data.append(line)
+                                        except json.JSONDecodeError:
+                                            continue
+
+                                ocr_item.raw_jsons = data
                         else:
                             res_json = json.loads(response_text)
                             ocr_item.text = res_json.get("result", {}).get("textAnnotation", {}).get("fullText", "")
@@ -180,7 +193,8 @@ async def get_index():
 @app.post("/scan-file")
 async def run_scan_file(
     file: UploadFile = File(...),
-    model: str = Form("page")  # Добавляем параметр с дефолтным значением
+    model: str = Form("page"),  # Добавляем параметр с дефолтным значением
+    pdflayer: bool = Form(False)
 ):
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         raise HTTPException(
@@ -229,13 +243,20 @@ async def run_scan_file(
     async with aiohttp.ClientSession(connector=connector) as session:
         await start_processing(session, item, b64_content, headers, model)
         if item.status != "failed" and item.operation_id:
-            await get_result(session, item, headers)
+            await get_result(session, item, headers, pdflayer)
 
     if item.status == "completed" and item.text is not None:
         return JSONResponse(content={
             "filename": item.filename,
-            "txt_filename": item.txt_filename,
+            "txt_filename": f"{item.txt_filename}.txt",
             "text": item.text
+        })
+    elif item.status == "completed" and item.raw_jsons is not None:
+        pdf = add_text_layer(pdf_data=content, json_data=item.raw_jsons)
+        return JSONResponse(content={
+            "filename": item.filename,
+            "txt_filename": f"{item.txt_filename}.pdf",
+            "pdf": base64.b64encode(pdf).decode("ascii")
         })
     else:
         raise HTTPException(
