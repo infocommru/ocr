@@ -33,7 +33,6 @@ POLL_TIMEOUT_SECONDS = 180         # Таймаут на polling операци�
 async_limiter_post = AsyncLimiter(max_rate=10, time_period=1)
 async_limiter_get = AsyncLimiter(max_rate=50, time_period=1)
 
-
 class OCRResult:
     def __init__(self, filename: str, mime_type: str):
         self.filename = filename

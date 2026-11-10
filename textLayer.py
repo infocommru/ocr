@@ -403,7 +403,7 @@ def add_text_layer(
     space_per_word: bool = True,
     sort_spatial: bool = True,
     min_gap: float = 0.0,
-    strip_mode: str = "auto",
+    strip_mode: str = "always",
 ) -> Optional[bytes]:
     """
     pdf_data   — содержимое PDF;
