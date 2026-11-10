@@ -7,18 +7,6 @@ add_text_layer.py
 На каждую страницу PDF — свой JSON; порядок JSON в списке соответствует
 порядку страниц PDF (json_data[i] → страница i + 1).
 
-Поведение по умолчанию (strip_mode="auto"):
-  * страница-скан (есть большое изображение) с уже имеющимся текстом
-        → старый текстовый слой УДАЛЯЕТСЯ (redaction, картинка сохраняется),
-          затем накладывается новая подложка из JSON;
-  * born-digital страница (есть реальный текст, изображения нет)
-        → текст СОХРАНЯЕТСЯ, страница пропускается (иначе стала бы пустой);
-  * страница без текста → просто накладывается подложка.
-
-Режимы strip_mode:
-  "always" → чистить текст на ВСЕХ страницах;
-  "never"  → ничего не чистить, страницы с текстом пропускаются.
-
 Зависимости:
     pip install PyMuPDF
 """
@@ -319,76 +307,34 @@ def fit_fontsize(font_obj, text: str, max_w: float, start_fs: float,
 # Работа с существующим текстом
 # ---------------------------------------------------------------------------
 
-def strip_page_text(page) -> int:
-    """Удалить весь текстовый слой страницы, сохранив картинки и графику."""
-    try:
-        blocks = page.get_text("dict").get("blocks", [])
-    except Exception:
-        return 0
-    n = 0
+def strip_page_text(page):
+    blocks = page.get_text("dict")["blocks"]
+
+    total_spans = 0
+    redactions = 0
+
     for block in blocks:
-        if block.get("type") != 0:
-            continue
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                bb = span.get("bbox")
-                if not bb:
-                    continue
-                try:
-                    r = pymupdf.Rect(bb)
-                except Exception:
-                    continue
-                if r.is_empty or r.is_infinite:
-                    continue
-                try:
-                    page.add_redact_annot(r, fill=None)
-                    n += 1
-                except Exception:
-                    pass
-    if n:
-        try:
-            page.apply_redactions(
-                images= pymupdf.PDF_REDACT_IMAGE_NONE,
-                graphics= pymupdf.PDF_REDACT_LINE_ART_NONE,
-            )
-        except (TypeError, AttributeError):
-            try:
-                page.apply_redactions(images=0)
-            except Exception:
-                page.apply_redactions()
-    return n
+        if block.get("type") == 0:
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    total_spans += 1
 
+                    if not span.get("text", "").strip():
+                        continue
 
-def page_is_born_digital(page,
-                         min_img_cover: float = BORN_DIGITAL_MIN_IMG_COVER,
-                         min_text_chars: int = MIN_TEXT_CHARS) -> bool:
-    """True, если на странице есть реальный текст без «подложки-изображения»."""
-    try:
-        text = page.get_text("text").strip()
-    except Exception:
-        return False
-    if len(text) < min_text_chars:
-        return False
-    try:
-        infos = page.get_image_info()
-    except Exception:
-        return True
-    if not infos:
-        return True
-    pa = page.rect.get_area()
-    if pa <= 0:
-        return True
-    covered = 0.0
-    for info in infos:
-        bb = info.get("bbox")
-        if not bb:
-            continue
-        try:
-            covered += pymupdf.Rect(bb).get_area()
-        except Exception:
-            pass
-    return covered / pa < min_img_cover
+                    rect = pymupdf.Rect(span["bbox"])
+                    page.add_redact_annot(rect, fill=False)
+                    redactions += 1
 
+    if redactions:
+        page.apply_redactions(
+            images=0,
+            graphics=0,
+            text=0
+        )
+
+    remaining = len(page.get_text("words"))
+    return redactions
 
 # ---------------------------------------------------------------------------
 # Наложение текстового слоя
@@ -403,7 +349,6 @@ def add_text_layer(
     space_per_word: bool = True,
     sort_spatial: bool = True,
     min_gap: float = 0.0,
-    strip_mode: str = "always",
 ) -> Optional[bytes]:
     """
     pdf_data   — содержимое PDF;
@@ -435,29 +380,7 @@ def add_text_layer(
                 continue
             page = doc[idx]
 
-            text_chars = len(page.get_text("text").strip())
-            born_digital = page_is_born_digital(page) if text_chars else False
-
-            do_strip = False
-            do_skip = False
-
-            if strip_mode == "always":
-                do_strip = True
-            elif strip_mode == "auto":
-                if text_chars >= MIN_TEXT_CHARS:
-                    if born_digital:
-                        do_skip = True
-                    else:
-                        do_strip = True
-            elif strip_mode == "never":
-                if text_chars >= MIN_TEXT_CHARS:
-                    do_skip = True
-
-            if do_skip:
-                continue
-
-            if do_strip:
-                strip_page_text(page)
+            strip_page_text(page)
 
             sx, sy = page_scales(page, page_sizes.get(page_num), dpi)
             if font_file:
