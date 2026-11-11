@@ -308,7 +308,8 @@ def fit_fontsize(font_obj, text: str, max_w: float, start_fs: float,
 # ---------------------------------------------------------------------------
 
 def strip_page_text(page):
-    blocks = page.get_text("dict")["blocks"]
+    blocks = page.get_text("dict",
+        flags=pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES,)["blocks"]
 
     total_spans = 0
     redactions = 0
@@ -333,7 +334,6 @@ def strip_page_text(page):
             text=0
         )
 
-    remaining = len(page.get_text("words"))
     return redactions
 
 # ---------------------------------------------------------------------------
@@ -440,3 +440,4 @@ def add_text_layer(
         return doc.tobytes()
     finally:
         doc.close()
+        pymupdf.TOOLS.store_shrink(100)
