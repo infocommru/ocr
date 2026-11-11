@@ -302,40 +302,6 @@ def fit_fontsize(font_obj, text: str, max_w: float, start_fs: float,
         fs *= 0.93
     return max(fs, 0.5)
 
-
-# ---------------------------------------------------------------------------
-# Работа с существующим текстом
-# ---------------------------------------------------------------------------
-
-def strip_page_text(page):
-    blocks = page.get_text("dict",
-        flags=pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES,)["blocks"]
-
-    total_spans = 0
-    redactions = 0
-
-    for block in blocks:
-        if block.get("type") == 0:
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    total_spans += 1
-
-                    if not span.get("text", "").strip():
-                        continue
-
-                    rect = pymupdf.Rect(span["bbox"])
-                    page.add_redact_annot(rect, fill=False)
-                    redactions += 1
-
-    if redactions:
-        page.apply_redactions(
-            images=0,
-            graphics=0,
-            text=0
-        )
-
-    return redactions
-
 # ---------------------------------------------------------------------------
 # Наложение текстового слоя
 # ---------------------------------------------------------------------------
@@ -379,8 +345,6 @@ def add_text_layer(
             if not (0 <= idx < doc.page_count):
                 continue
             page = doc[idx]
-
-            strip_page_text(page)
 
             sx, sy = page_scales(page, page_sizes.get(page_num), dpi)
             if font_file:

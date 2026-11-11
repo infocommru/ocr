@@ -1,8 +1,6 @@
 import asyncio
-import io
 import os
 import base64
-import mimetypes
 import time
 import json  # Добавлено для парсинга JSON/JSONL
 import aiohttp
@@ -11,6 +9,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
+
+from stripPDF import strip_pdf, split_pdf_to_images, MAX_FILE_SIZE
 from textLayer import add_text_layer
 
 app = FastAPI(title="Yandex OCR Web Service")
@@ -26,8 +26,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID")
 
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
-POLL_TIMEOUT_SECONDS = 180         # Таймаут на polling операции OCR
+POLL_TIMEOUT_SECONDS = 320         # Таймаут на polling операции OCR
 
 # Лимитеры запросов к Yandex Cloud API
 async_limiter_post = AsyncLimiter(max_rate=10, time_period=1)
@@ -105,7 +104,7 @@ async def start_processing(session: aiohttp.ClientSession, ocr_item: OCRResult, 
                 return ocr_item
 
 
-async def get_result(session: aiohttp.ClientSession, ocr_item: OCRResult, headers: dict, PDFlayer: bool):
+async def get_result(session: aiohttp.ClientSession, ocr_item: OCRResult, headers: dict, returnJSON: bool):
     if ocr_item.status == "failed" or not ocr_item.operation_id:
         return ocr_item
 
@@ -145,7 +144,7 @@ async def get_result(session: aiohttp.ClientSession, ocr_item: OCRResult, header
                         
                         # PDF возвращает результат в формате JSONL (по строке на страницу)
                         if ocr_item.mime_type == "application/pdf":
-                            if not PDFlayer:
+                            if not returnJSON:
                                 texts = []
                                 for line in response_text.strip().split('\n'):
                                     if line.strip():
@@ -172,8 +171,14 @@ async def get_result(session: aiohttp.ClientSession, ocr_item: OCRResult, header
 
                                 ocr_item.raw_jsons = data
                         else:
-                            res_json = json.loads(response_text)
-                            ocr_item.text = res_json.get("result", {}).get("textAnnotation", {}).get("fullText", "")
+                            if not returnJSON:
+                                res_json = json.loads(response_text)
+                                ocr_item.text = res_json.get("result", {}).get("textAnnotation", {}).get("fullText", "")
+                            else:
+                                try:
+                                    ocr_item.raw_jsons = [response_text]
+                                except json.JSONDecodeError:
+                                    continue
                         
                         ocr_item.status = "completed"
                         return ocr_item
@@ -203,29 +208,37 @@ async def run_scan_file(
 
     mime_type = get_mime_type(file)
     item = OCRResult(filename=file.filename or "file", mime_type=mime_type)
+    jpgFromPDF = None
 
     try:
-        content = await file.read(MAX_FILE_SIZE + 1)
-        if len(content) > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Файл превышает лимит {MAX_FILE_SIZE // (1024 * 1024)} МБ"
-            )
+        content = await file.read()
         if not content:
             raise HTTPException(status_code=400, detail="Пустой файл (0 байт)")
 
-        if item.mime_type == "JPEG" and not content.startswith(b'\xff\xd8\xff'):
-            raise HTTPException(
-                status_code=400,
-                detail="Файл не является валидным изображением JPEG"
-            )
-        elif item.mime_type == "application/pdf" and not content.startswith(b'%PDF'):
-            raise HTTPException(
-                status_code=400,
-                detail="Файл не является валидным PDF-документом"
-            )
+        if item.mime_type == "JPEG":
+            if not content.startswith(b'\xff\xd8\xff'):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Файл не является валидным изображением JPEG"
+                )
+            else:
+                if len(content) > MAX_FILE_SIZE:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Файл превышает лимит {MAX_FILE_SIZE // (1024 * 1024)} МБ"
+                    )
 
-        b64_content = base64.b64encode(content).decode("utf-8")
+        elif item.mime_type == "application/pdf":
+            if not content.startswith(b'%PDF'):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Файл не является валидным PDF-документом"
+                )
+            else:
+                content = strip_pdf(content)
+
+                if len(content) > MAX_FILE_SIZE:
+                    jpgFromPDF = split_pdf_to_images(content)
     except HTTPException:
         raise
     except Exception as e:
@@ -238,27 +251,65 @@ async def run_scan_file(
         "x-data-logging-enabled": "true",
     }
 
-    connector = aiohttp.TCPConnector(limit=10)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        await start_processing(session, item, b64_content, headers, model)
-        if item.status != "failed" and item.operation_id:
-            await get_result(session, item, headers, pdflayer)
+    if not jpgFromPDF:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=10)) as session:
+            b64_content = base64.b64encode(content).decode("utf-8")
 
-    if item.status == "completed" and item.text is not None:
-        return JSONResponse(content={
-            "filename": item.filename,
-            "txt_filename": f"{item.txt_filename}.txt",
-            "text": item.text
-        })
-    elif item.status == "completed" and item.raw_jsons is not None:
-        pdf = add_text_layer(pdf_data=content, json_data=item.raw_jsons)
-        return JSONResponse(content={
-            "filename": item.filename,
-            "txt_filename": f"{item.txt_filename}.pdf",
-            "pdf": base64.b64encode(pdf).decode("ascii")
-        })
+            await start_processing(session, item, b64_content, headers, model)
+            if item.status != "failed" and item.operation_id:
+                await get_result(session, item, headers, pdflayer)
+
+        if item.status == "completed" and item.text is not None:
+            return JSONResponse(content={
+                "filename": item.filename,
+                "txt_filename": f"{item.txt_filename}.txt",
+                "text": item.text
+            })
+        elif item.status == "completed" and item.raw_jsons is not None:
+            pdf = add_text_layer(pdf_data=content, json_data=item.raw_jsons)
+            return JSONResponse(content={
+                "filename": item.filename,
+                "txt_filename": f"{item.txt_filename}.pdf",
+                "pdf": base64.b64encode(pdf).decode("utf-8")
+            })
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail=item.error or "Неизвестная ошибка распознавания Yandex API"
+            )
     else:
-        raise HTTPException(
-            status_code=422,
-            detail=item.error or "Неизвестная ошибка распознавания Yandex API"
-        )
+        result = []
+
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=10)) as session:
+            for jpg in jpgFromPDF:  
+                b64_content = base64.b64encode(jpg).decode("utf-8")
+                item.mime_type = "JPEG"
+                
+                await start_processing(session, item, b64_content, headers, model)
+                if item.status != "failed" and item.operation_id:
+                    await get_result(session, item, headers, pdflayer)
+                    
+                    if item.status == "completed" and item.text is not None:
+                        result.append(item.text)
+                    elif item.status == "completed" and item.raw_jsons is not None:
+                        result.append(item.raw_jsons[0])
+                    else:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=item.error or "Неизвестная ошибка распознавания Yandex API"
+                        )
+
+        if pdflayer:
+            pdf = add_text_layer(pdf_data=content, json_data=result)
+            return JSONResponse(content={
+                "filename": item.filename,
+                "txt_filename": f"{item.txt_filename}.pdf",
+                "pdf": base64.b64encode(pdf).decode("utf-8")
+            })
+        else:
+            rText = "\n\n--- Страница ---\n\n".join(result)
+            return JSONResponse(content={
+                "filename": item.filename,
+                "txt_filename": f"{item.txt_filename}.txt",
+                "text": rText
+            }) 
