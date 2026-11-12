@@ -29,8 +29,9 @@ YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID")
 POLL_TIMEOUT_SECONDS = 320         # Таймаут на polling операции OCR
 
 # Лимитеры запросов к Yandex Cloud API
-async_limiter_post = AsyncLimiter(max_rate=10, time_period=1)
-async_limiter_get = AsyncLimiter(max_rate=50, time_period=1)
+WORKERS = int(os.environ.get("WEB_CONCURRENCY", "1"))
+async_limiter_post = AsyncLimiter(max_rate=max(1, 10 // WORKERS), time_period=1)
+async_limiter_get = AsyncLimiter(max_rate=max(1, 50 // WORKERS), time_period=1)
 
 class OCRResult:
     def __init__(self, filename: str, mime_type: str):
